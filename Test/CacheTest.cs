@@ -11,10 +11,7 @@ namespace Test
         [TestMethod]
         public void TestCache()
         {
-            CacheFallBack<string, string> fallback = (key) =>
-            {
-                return RetrivationResult<string>.Create(key);
-            };
+            CacheFallBack<string, string> fallback = (key) => CacheValue<string>.From(key);
 
             int times = 500;
             List<string> data = GenerateData(100);
@@ -31,7 +28,7 @@ namespace Test
             }
             int total = cache.TotalFetch;
             int hit = cache.HitCount;
-
+            Console.WriteLine($"Hit rate: {hit * 1.0 / total}");
         }
 
         private List<string> GenerateData(int count)
@@ -45,6 +42,7 @@ namespace Test
             }
             return list;
         }
+
         private string RandomString()
         {
             return Guid.NewGuid().ToString();

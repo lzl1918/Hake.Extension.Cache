@@ -3,6 +3,7 @@
     public interface ICache<TKey, TValue>
     {
         int Capacity { get; }
+
         int Count { get; }
 
 #if TEST
@@ -11,6 +12,7 @@
 #endif
 
         TValue Get(TKey key, CacheFallBack<TKey, TValue> fallback);
+
         void Clear();
     }
 }

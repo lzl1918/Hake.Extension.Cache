@@ -2,16 +2,22 @@ using Hake.Extension.Cache;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 
 namespace Test
 {
-    public class TypeComparer : IComparer<Type>
+    public class TypeComparer : IEqualityComparer<Type>
     {
-        public int Compare(Type x, Type y)
+        public bool Equals(Type x, Type y)
         {
-            return x.FullName.CompareTo(y.FullName);
+            return x.AssemblyQualifiedName.Equals(y.AssemblyQualifiedName);
+        }
+
+        public int GetHashCode(Type obj)
+        {
+            return obj.AssemblyQualifiedName.GetHashCode();
         }
     }
 
@@ -21,10 +27,7 @@ namespace Test
         [TestMethod]
         public void TestTypeCache()
         {
-            CacheFallBack<Type, string> fallback = (key) =>
-            {
-                return RetrivationResult<string>.Create(key.FullName);
-            };
+            CacheFallBack<Type, string> fallback = (key) => CacheValue<string>.From(key.FullName);
 
             int times = 500;
             List<Type> data = GenerateData(10);
@@ -42,13 +45,14 @@ namespace Test
             int total = cache.TotalFetch;
             int hit = cache.HitCount;
 
+            Console.WriteLine($"Hit rate: {hit * 1.0 / total}");
         }
 
         private List<Type> GenerateData(int count)
         {
-            Assembly assembly = Assembly.LoadFile(@"E:\Projects\Github\Hake.Extension.Cache\Test\bin\Test\netcoreapp2.0\Hake.Extension.Cache.dll");
+            string assemblyPath = Path.Combine(Directory.GetCurrentDirectory(), "Hake.Extension.Cache.dll");
+            Assembly assembly = Assembly.LoadFile(assemblyPath);
             return assembly.GetTypes().Take(count).ToList();
-
         }
     }
 }

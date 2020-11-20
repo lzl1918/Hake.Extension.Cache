@@ -5,89 +5,49 @@ namespace Hake.Extension.Cache
 {
     public class Cache<TKey, TValue> : ICache<TKey, TValue>
     {
-        private Dictionary<TKey, TValue> dictionary;
-        private SortedList<TKey, CounterValue> counter;
-        private Stack<CounterValue> counterPool;
-        private TKey maxKey;
-        private CounterValue maxCounter;
-        private object locker;
+        private readonly Dictionary<TKey, TValue> mDictionary;
+        private readonly Dictionary<TKey, Counter> mUsageCounters;
+        private readonly Stack<Counter> mCounterPool;
 
-        private int capacity;
+        private TKey mMaxKey;
+        private Counter mMaxCounter;
+
+        private readonly object mLocker;
+
+        private readonly int mCapacity;
 
 #if TEST
         public int TotalFetch { get; private set; }
         public int HitCount { get; private set; }
 #endif
 
-        public int Capacity => capacity;
-        public int Count => dictionary.Count;
+        public int Capacity => mCapacity;
 
-        public Cache(int capacity, IComparer<TKey> keyComparer, IEqualityComparer<TKey> keyEqualComparer)
+        public int Count => mDictionary.Count;
+
+        public Cache(int capacity, IEqualityComparer<TKey> keyComparer)
         {
-            locker = new object();
-            this.capacity = capacity;
-            dictionary = new Dictionary<TKey, TValue>(capacity: capacity, comparer: keyEqualComparer);
-            counter = new SortedList<TKey, CounterValue>(capacity: capacity, comparer: keyComparer);
-            counterPool = new Stack<CounterValue>(capacity: capacity);
-            int i = 0;
-            while (i < capacity)
+            mLocker = new object();
+            mCapacity = capacity;
+            mDictionary = new Dictionary<TKey, TValue>(capacity: capacity, comparer: keyComparer);
+            mUsageCounters = new Dictionary<TKey, Counter>(capacity: capacity, comparer: keyComparer);
+            mCounterPool = new Stack<Counter>(capacity: capacity);
+            for (int i = 0; i < capacity; i++)
             {
-                counterPool.Push(new CounterValue());
-                i++;
-            }
-        }
-        public Cache(int capacity, IComparer<TKey> keyComparer)
-        {
-            locker = new object();
-            this.capacity = capacity;
-            dictionary = new Dictionary<TKey, TValue>(capacity: capacity);
-            counter = new SortedList<TKey, CounterValue>(capacity: capacity, comparer: keyComparer);
-            counterPool = new Stack<CounterValue>(capacity: capacity);
-            int i = 0;
-            while (i < capacity)
-            {
-                counterPool.Push(new CounterValue());
-                i++;
-            }
-        }
-        public Cache(int capacity, IEqualityComparer<TKey> keyEqualComparer)
-        {
-            locker = new object();
-            this.capacity = capacity;
-            dictionary = new Dictionary<TKey, TValue>(capacity: capacity, comparer: keyEqualComparer);
-            counter = new SortedList<TKey, CounterValue>(capacity: capacity);
-            counterPool = new Stack<CounterValue>(capacity: capacity);
-            int i = 0;
-            while (i < capacity)
-            {
-                counterPool.Push(new CounterValue());
-                i++;
+                mCounterPool.Push(new Counter());
             }
         }
 
-        public Cache(int capacity)
-        {
-            locker = new object();
-            this.capacity = capacity;
-            dictionary = new Dictionary<TKey, TValue>(capacity: capacity);
-            counter = new SortedList<TKey, CounterValue>(capacity: capacity);
-            counterPool = new Stack<CounterValue>(capacity: capacity);
-            int i = 0;
-            while (i < capacity)
-            {
-                counterPool.Push(new CounterValue());
-                i++;
-            }
-        }
+        public Cache(int capacity) : this(capacity, null) { }
 
         public TValue Get(TKey key, CacheFallBack<TKey, TValue> fallback)
         {
-            lock (locker)
+            lock (mLocker)
             {
 #if TEST
                 TotalFetch++;
 #endif
-                if (dictionary.TryGetValue(key, out TValue value))
+                if (mDictionary.TryGetValue(key, out TValue value))
                 {
 #if TEST
                     HitCount++;
@@ -97,31 +57,37 @@ namespace Hake.Extension.Cache
                 }
 
                 if (fallback == null)
-                    throw new ArgumentNullException(nameof(fallback));
-
-                RetrivationResult<TValue> retrivationResult = fallback(key);
-                if (!retrivationResult.AddToCache)
-                    return retrivationResult.Value;
-
-                TValue result = retrivationResult.Value;
-                CounterValue currentCounter;
-                if (dictionary.Count >= capacity)
                 {
-                    dictionary.Remove(maxKey);
-                    counter.Remove(maxKey);
-                    currentCounter = maxCounter;
-                    currentCounter.ResetCounter();
-                    UpdateCounterAfterFail();
-                    dictionary.Add(key, result);
-                    counter.Add(key, currentCounter);
+                    throw new ArgumentNullException(nameof(fallback));
+                }
+
+                CacheValue<TValue> cacheValue = fallback(key);
+                if (!cacheValue.AddToCache)
+                {
+                    return cacheValue.Value;
+                }
+
+                TValue result = cacheValue.Value;
+                Counter currentCounter;
+                if (mDictionary.Count >= mCapacity)
+                {
+                    mDictionary.Remove(mMaxKey);
+                    mUsageCounters.Remove(mMaxKey);
+                    currentCounter = mMaxCounter;
+                    currentCounter.Reset();
+                    IncreaseAllCounters();
+                    FindMaxKey();
+                    mDictionary.Add(key, result);
+                    mUsageCounters.Add(key, currentCounter);
                 }
                 else
                 {
-                    UpdateCounterAfterFail();
-                    dictionary.Add(key, result);
-                    currentCounter = counterPool.Pop();
-                    currentCounter.ResetCounter();
-                    counter.Add(key, currentCounter);
+                    IncreaseAllCounters();
+                    FindMaxKey();
+                    mDictionary.Add(key, result);
+                    currentCounter = mCounterPool.Pop();
+                    currentCounter.Reset();
+                    mUsageCounters.Add(key, currentCounter);
                 }
                 return result;
             }
@@ -129,61 +95,81 @@ namespace Hake.Extension.Cache
 
         private void UpdateCounter(TKey hitKey)
         {
-            CounterValue value = counter[hitKey];
-            int count = value.Counter;
-            value.ResetCounter();
-            maxKey = hitKey;
-            maxCounter = value;
+            Counter hitCounter = mUsageCounters[hitKey];
+            int hitCount = hitCounter.Count;
+            hitCounter.Reset();
+            mMaxKey = hitKey;
+            mMaxCounter = hitCounter;
             int maxCount = 0;
-            int valueCount;
-            foreach (var pair in counter)
+#if NET5_0
+            foreach ((TKey key, Counter counter) in mUsageCounters)
             {
-                if (pair.Key.Equals(hitKey))
+#else
+            foreach (KeyValuePair<TKey, Counter> pair in mUsageCounters)
+            {
+                TKey key = pair.Key;
+                Counter counter = pair.Value;
+#endif
+                if (key.Equals(hitKey))
+                {
                     continue;
+                }
 
-                value = pair.Value;
-                valueCount = value.Counter;
-                if (valueCount < count)
-                    value.AddCounter();
+                int valueCount = counter.Count;
+                if (valueCount < hitCount)
+                {
+                    counter.Increase();
+                }
 
                 if (valueCount > maxCount)
                 {
-                    maxKey = pair.Key;
+                    mMaxKey = key;
                     maxCount = valueCount;
-                    maxCounter = value;
+                    mMaxCounter = counter;
                 }
             }
         }
-        private void UpdateCounterAfterFail()
-        {
-            CounterValue value;
-            int maxCount = -1;
-            int valueCount;
-            foreach (var pair in counter)
-            {
-                value = pair.Value;
-                valueCount = value.Counter;
-                value.AddCounter();
 
+        private void IncreaseAllCounters()
+        {
+            foreach (Counter counter in mUsageCounters.Values)
+            {
+                counter.Increase();
+            }
+        }
+
+        private void FindMaxKey()
+        {
+            int maxCount = 0;
+#if NET5_0
+            foreach ((TKey key, Counter counter) in mUsageCounters)
+            {
+#else
+            foreach (KeyValuePair<TKey, Counter> pair in mUsageCounters)
+            {
+                TKey key = pair.Key;
+                Counter counter = pair.Value;
+#endif
+                int valueCount = counter.Count;
                 if (valueCount > maxCount)
                 {
-                    maxKey = pair.Key;
+                    mMaxKey = key;
                     maxCount = valueCount;
-                    maxCounter = value;
+                    mMaxCounter = counter;
                 }
             }
         }
 
         public void Clear()
         {
-            lock (locker)
+            lock (mLocker)
             {
-                dictionary.Clear();
-                foreach (var pair in counter)
+                mDictionary.Clear();
+                foreach (Counter counter in  mUsageCounters.Values)
                 {
-                    counterPool.Push(pair.Value);
+                    mCounterPool.Push(counter);
                 }
-                counter.Clear();
+                mUsageCounters.Clear();
             }
         }
     }
